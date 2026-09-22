@@ -16,9 +16,11 @@ from .database import connect, init_db
 from .engine import (
     CompiledRuleset,
     EvaluationFailed,
+    ImpactAnalysisError,
     RulesetCompileError,
     compile_ruleset,
     evaluate,
+    impact_analysis,
 )
 from .schemas import (
     BatchEvaluationOut,
@@ -27,6 +29,8 @@ from .schemas import (
     EvaluateRequest,
     EvaluationOut,
     EvaluationStatsOut,
+    ImpactOut,
+    ImpactRequest,
     RecomputeRequest,
     RulesetCreate,
     RulesetMeta,
@@ -281,6 +285,41 @@ def get_version(
             return _error("NOT_FOUND", f"规则集不存在：{ruleset_id}", 404)
         return _error("VERSION_NOT_FOUND", f"版本 {version} 不存在", 404)
     return _version_out(snapshot)
+
+
+# ---------- 静态影响分析 ----------
+
+
+@app.post(
+    "/api/rulesets/{ruleset_id}/impact",
+    response_model=ImpactOut,
+    tags=["rulesets"],
+    responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+)
+def ruleset_impact(
+    ruleset_id: str,
+    req: ImpactRequest,
+    conn: sqlite3.Connection = Depends(get_db),
+) -> Any:
+    """静态依赖影响分析：不执行文档求值、不写入 evaluations。
+
+    基于指定版本快照中已编译的 depends_on 与条件表达式引用，计算输入规则的
+    反向传递依赖闭包（direct/transitive dependents），并标记同 conflict_group
+    的联动规则。规则集或版本不存在返回 404；规则编码不存在返回 422。
+    """
+    if crud.get_ruleset(conn, ruleset_id) is None:
+        return _error("NOT_FOUND", f"规则集不存在：{ruleset_id}", 404)
+    try:
+        _snapshot, compiled = _load_compiled(conn, ruleset_id, req.version)
+    except LookupError:
+        return _error("VERSION_NOT_FOUND", f"版本 {req.version} 不存在", 404)
+
+    try:
+        result = impact_analysis(compiled, req.rule_codes)
+    except ImpactAnalysisError as exc:
+        return _error(exc.code, exc.message, 422, details=exc.details)
+
+    return {"ruleset_id": ruleset_id, "version": req.version, **result}
 
 
 # ---------- 决策计算 ----------

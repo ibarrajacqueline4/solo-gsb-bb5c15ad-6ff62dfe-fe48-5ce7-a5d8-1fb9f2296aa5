@@ -179,6 +179,7 @@ SEED_DEMO=1 uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `GET`  | `/api/rulesets/{id}` | 获取规则集元数据 |
 | `GET`  | `/api/rulesets/{id}/versions` | 列出全部版本 |
 | `GET`  | `/api/rulesets/{id}/versions/{version}` | 获取指定版本快照 |
+| `POST` | `/api/rulesets/{id}/impact` | 静态依赖影响分析（不求值、不落库） |
 | `PUT`  | `/api/rulesets/{id}` | 修改规则集 → 生成新版本并自动重算 |
 | `POST` | `/api/rulesets/{id}/evaluate` | 用最新版（或 `?version=n` 指定旧版）决策，默认持久化结果 |
 | `POST` | `/api/rulesets/{id}/evaluate-batch` | 批量决策（≤100 项），整批固定同一版本，逐项隔离错误 |
@@ -352,6 +353,84 @@ curl -i -X POST localhost:8000/api/rulesets -H 'Content-Type: application/json' 
 # {"error": {"code": "CYCLIC_DEPENDENCY", "message": "规则依赖存在循环：a -> b -> a", "cycle": ["a","b","a"]}}
 ```
 
+### 静态依赖影响分析
+
+`POST /api/rulesets/{id}/impact` 用于在**改动规则前评估影响面**：提交
+`version` 与一个或多个 `rule_codes`，服务基于该版本快照中**已编译**的
+`depends_on` 与条件表达式引用，静态计算反向传递依赖闭包——**不执行任何
+文档求值，也不会写入 evaluations**。
+
+请求体：
+
+| 字段 | 说明 |
+| --- | --- |
+| `version` | **必填**，分析所基于的规则版本（不可变快照） |
+| `rule_codes` | 一个或多个待分析的规则编码（至少 1 个；重复编码去重保序） |
+
+响应字段：
+
+- `rule_codes`：去重保序后的输入回显；
+- `direct_dependents`：**直接依赖**任一输入规则的规则（反向边 1 跳）；
+- `transitive_dependents`：**传递依赖**（反向边 ≥2 跳）的规则；多路径可达时
+  按最短路径计层级，因此已计入 direct 的规则不会再出现在这里；
+- `affected`：输入规则（`level=0`）与上述两类受影响规则的并集，按
+  `evaluation_order` 排列，每项含 `level`（0/1/≥2）与 `relation`
+  （`input` / `direct_dependent` / `transitive_dependent`）；
+- `coupled_rules`：与任一受影响规则（含输入）处于**同一 `conflict_group`**
+  的其余规则。它们不经依赖边被波及（`level` 恒为 `null`），但运行时可能因
+  冲突策略联动（被压制或反向胜出）；`coupled_with` 指出 evaluation_order 上
+  第一个触发联动的受影响规则。若某条联动规则本身已在依赖闭包中，则依赖分类
+  优先，不在此重复出现；联动关系也不会继续向外传播。
+
+所有规则列表均按该版本的 `evaluation_order` 排列，保证输出确定。
+
+错误情况：
+
+- 规则集不存在 → **404** `NOT_FOUND`；
+- 版本不存在 → **404** `VERSION_NOT_FOUND`；
+- 规则编码在该版本中不存在 → **422** `RULE_NOT_FOUND`
+  （`details.rule_codes` 列出全部缺失编码）；
+- 请求体缺字段、`version<1`、`rule_codes` 为空 → **422**。
+
+请求示例（演示规则集 v1 中，`is_vip` 被 `vip_discount` 引用，后者又被
+`manual_review` 引用；`vip_discount` 与 `large_order` 同属 discount 组）：
+
+```bash
+curl -s -X POST localhost:8000/api/rulesets/demo-promotions/impact \
+  -H 'Content-Type: application/json' \
+  -d '{"version": 1, "rule_codes": ["is_vip"]}' | python3 -m json.tool
+```
+
+响应示例：
+
+```json
+{
+  "ruleset_id": "demo-promotions",
+  "version": 1,
+  "rule_codes": ["is_vip"],
+  "affected": [
+    {"rule_code": "is_vip", "level": 0, "relation": "input"},
+    {"rule_code": "vip_discount", "level": 1, "relation": "direct_dependent"},
+    {"rule_code": "manual_review", "level": 2, "relation": "transitive_dependent"}
+  ],
+  "direct_dependents": ["vip_discount"],
+  "transitive_dependents": ["manual_review"],
+  "coupled_rules": [
+    {
+      "rule_code": "large_order",
+      "conflict_group": "discount",
+      "coupled_with": "vip_discount",
+      "level": null
+    }
+  ]
+}
+```
+
+一次提交多个规则时，各规则的闭包取并集；例如同时分析
+`["large_order", "is_vip"]` 会得到直接依赖方
+`["vip_discount", "free_shipping"]` 与传递依赖方 `["manual_review"]`，
+而 discount 组双方都已在闭包内，不再产生联动项。
+
 ## 测试
 
 ```bash
@@ -360,5 +439,6 @@ pytest -q
 ```
 
 测试覆盖：AST 沙箱安全性、编译校验（重复编码/未知依赖/隐式引用/循环/冲突策略冲突）、
-拓扑排序、定点迭代、三种冲突策略、版本化重算、评估统计聚合（筛选/排序/零值/非法参数），
+拓扑排序、定点迭代、三种冲突策略、版本化重算、评估统计聚合（筛选/排序/零值/非法参数）、
+静态影响分析（反向闭包/层级/多输入去重/冲突组联动/404 与 422），
 以及完整 HTTP 接口。

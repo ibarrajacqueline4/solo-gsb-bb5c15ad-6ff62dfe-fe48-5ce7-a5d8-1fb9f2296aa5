@@ -145,6 +145,66 @@ class RecomputeRequest(BaseModel):
     )
 
 
+class ImpactRequest(BaseModel):
+    version: int = Field(
+        ..., ge=1, description="分析所基于的规则版本（必填，不可变快照）"
+    )
+    rule_codes: list[str] = Field(
+        ...,
+        min_length=1,
+        description="一个或多个待分析的规则编码",
+    )
+
+
+class ImpactedRuleOut(BaseModel):
+    rule_code: str = Field(..., description="规则编码")
+    level: int = Field(
+        ...,
+        description="受影响层级：0=输入规则，1=直接依赖方，>=2=传递依赖方",
+    )
+    relation: Literal["input", "direct_dependent", "transitive_dependent"]
+
+
+class CoupledRuleOut(BaseModel):
+    rule_code: str = Field(..., description="联动规则编码")
+    conflict_group: str = Field(..., description="所属冲突组")
+    coupled_with: str = Field(
+        ..., description="evaluation_order 上第一个触发联动的受影响规则"
+    )
+    level: None = Field(
+        None, description="联动关系不经依赖边传播，故无层级，恒为 null"
+    )
+
+
+class ImpactOut(BaseModel):
+    ruleset_id: str
+    version: int = Field(..., description="实际分析的规则版本")
+    rule_codes: list[str] = Field(
+        ..., description="去重保序后的输入规则编码回显"
+    )
+    affected: list[ImpactedRuleOut] = Field(
+        ...,
+        description=(
+            "输入规则（level=0）与全部受影响规则，按 evaluation_order 排列；"
+            "包含输入、direct_dependents、transitive_dependents 三类"
+        ),
+    )
+    direct_dependents: list[str] = Field(
+        ..., description="直接依赖任一输入规则的规则，按 evaluation_order 排列"
+    )
+    transitive_dependents: list[str] = Field(
+        ...,
+        description="传递依赖（层级 >=2）的规则，按 evaluation_order 排列",
+    )
+    coupled_rules: list[CoupledRuleOut] = Field(
+        ...,
+        description=(
+            "与受影响规则处于同一 conflict_group 的其余规则；不经依赖边传播，"
+            "按 evaluation_order 排列"
+        ),
+    )
+
+
 class RuleStatOut(BaseModel):
     code: str = Field(..., description="规则编码")
     hit_count: int = Field(..., description="traces 中 hit=true 的决策条数")
