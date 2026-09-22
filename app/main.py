@@ -18,6 +18,7 @@ from .engine import (
     EvaluationFailed,
     RulesetCompileError,
     compile_ruleset,
+    dependency_impact,
     evaluate,
 )
 from .schemas import (
@@ -27,6 +28,8 @@ from .schemas import (
     EvaluateRequest,
     EvaluationOut,
     EvaluationStatsOut,
+    ImpactAnalysisOut,
+    ImpactRequest,
     RecomputeRequest,
     RulesetCreate,
     RulesetMeta,
@@ -451,6 +454,54 @@ def recompute(
     result = evaluate(compiled, document)
     # 重算产生新记录，旧结果依旧保留
     return crud.save_evaluation(conn, ruleset_id, target_version, document, result)
+
+
+# ---------- 影响分析 ----------
+
+
+@app.post(
+    "/api/rulesets/{ruleset_id}/impact",
+    response_model=ImpactAnalysisOut,
+    tags=["analysis"],
+    responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+)
+def impact_analysis(
+    ruleset_id: str,
+    req: ImpactRequest,
+    conn: sqlite3.Connection = Depends(get_db),
+) -> Any:
+    """静态依赖影响分析：只读编译产物，不执行文档求值，也不写入 evaluations。
+
+    基于指定版本已编译的 depends_on 与表达式引用构建反向依赖图，按层 BFS
+    求传递闭包；受影响规则按 evaluation_order 输出并带层级（level）。
+    与受影响规则同属一个 conflict_group 的其余规则标记为联动项。
+    """
+    row = crud.get_ruleset(conn, ruleset_id)
+    if row is None:
+        return _error("NOT_FOUND", f"规则集不存在：{ruleset_id}", 404)
+
+    target_version = req.version or row["current_version"]
+    try:
+        _snapshot, compiled = _load_compiled(conn, ruleset_id, target_version)
+    except LookupError:
+        return _error("VERSION_NOT_FOUND", f"版本 {target_version} 不存在", 404)
+
+    unknown = sorted({code for code in req.rule_codes if code not in compiled.by_code})
+    if unknown:
+        return _error(
+            "UNKNOWN_RULE_CODES",
+            f"规则编码不存在：{unknown}",
+            422,
+            {"unknown_rule_codes": unknown},
+        )
+
+    report = dependency_impact(compiled, req.rule_codes)
+    return {
+        "ruleset_id": ruleset_id,
+        "version": target_version,
+        "evaluation_order": compiled.evaluation_order,
+        **report,
+    }
 
 
 @app.get(

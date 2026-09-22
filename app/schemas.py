@@ -145,6 +145,45 @@ class RecomputeRequest(BaseModel):
     )
 
 
+class ImpactRequest(BaseModel):
+    version: int | None = Field(
+        None, ge=1, description="目标规则版本；缺省为最新版"
+    )
+    rule_codes: list[str] = Field(
+        ..., min_length=1, description="一个或多个待分析的规则编码"
+    )
+
+
+class ImpactedRuleOut(BaseModel):
+    rule_code: str
+    level: int = Field(
+        ..., description="0=输入规则，1=直接依赖者，≥2=传递依赖者（最短距离）"
+    )
+    via: list[str] = Field(
+        default_factory=list, description="最短影响路径上的直接来源规则"
+    )
+    conflict_group: str | None = None
+    coupled: bool = Field(
+        False, description="是否与受影响/联动集合内其他规则同属一个冲突组"
+    )
+
+
+class CoupledRuleOut(BaseModel):
+    rule_code: str
+    conflict_group: str
+    coupled_with: list[str] = Field(..., description="同冲突组内受影响的规则编码")
+
+
+class ImpactAnalysisOut(BaseModel):
+    ruleset_id: str
+    version: int = Field(..., description="实际使用的规则版本")
+    evaluation_order: list[str]
+    input_rules: list[ImpactedRuleOut]
+    direct_dependents: list[ImpactedRuleOut]
+    transitive_dependents: list[ImpactedRuleOut]
+    coupled_rules: list[CoupledRuleOut]
+
+
 class RuleStatOut(BaseModel):
     code: str = Field(..., description="规则编码")
     hit_count: int = Field(..., description="traces 中 hit=true 的决策条数")

@@ -15,6 +15,7 @@ from .compiler import (
     topo_order,
 )
 from .evaluator import EvaluationFailed, evaluate
+from .impact import dependency_impact
 
 __all__ = [
     "CompileError",
@@ -29,4 +30,5 @@ __all__ = [
     "topo_order",
     "EvaluationFailed",
     "evaluate",
+    "dependency_impact",
 ]

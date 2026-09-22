@@ -182,6 +182,7 @@ SEED_DEMO=1 uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `PUT`  | `/api/rulesets/{id}` | 修改规则集 → 生成新版本并自动重算 |
 | `POST` | `/api/rulesets/{id}/evaluate` | 用最新版（或 `?version=n` 指定旧版）决策，默认持久化结果 |
 | `POST` | `/api/rulesets/{id}/evaluate-batch` | 批量决策（≤100 项），整批固定同一版本，逐项隔离错误 |
+| `POST` | `/api/rulesets/{id}/impact` | 静态依赖影响分析：反向传递依赖闭包 + 冲突组联动项（不求值、不落库） |
 | `GET`  | `/api/rulesets/{id}/evaluations` | 列出该规则集的历史决策结果 |
 | `GET`  | `/api/rulesets/{id}/evaluation-stats` | 聚合已持久化决策：规则命中率与决策字段统计（支持 `version` / `since` / `until` 筛选） |
 | `GET`  | `/api/evaluations/{eval_id}` | 按 ID 查询单次决策结果 |
@@ -293,6 +294,57 @@ curl -s -X POST localhost:8000/api/rulesets/demo-promotions/evaluate-batch \
 > `status` / `error` 与顶层计数区分成败；仅当规则集或版本不存在等
 > 整批级问题发生时才返回 4xx。
 
+### 依赖影响分析
+
+`POST /api/rulesets/{id}/impact` 回答“修改这批规则会波及哪些规则”——
+**纯静态分析**：只读取指定版本已编译的 `depends_on` 与条件表达式引用，
+**不执行文档求值，也不写入 evaluations**。
+
+- 请求体：`version`（可选，缺省最新版）+ `rule_codes`（一个或多个规则编码）；
+- 在反向依赖图上按层 BFS 求**传递闭包**，`level` 为到输入规则集合的最短距离：
+  - `input_rules`：输入规则本身（`level=0`，去重保序回显）；
+  - `direct_dependents`：直接依赖输入规则的规则（`level=1`）；
+  - `transitive_dependents`：经传递依赖间接受影响的规则（`level≥2`）；
+- 受影响规则均**按 `evaluation_order` 排序**，`via` 给出最短影响路径的直接来源；
+- 与受影响规则同属一个 `conflict_group` 的其余规则不在依赖闭包内，但冲突
+  策略结果可能随之改变，列为**联动项** `coupled_rules`（受影响/联动集合内
+  同组规则的 `coupled` 标记为 `true`）；
+- 规则集或版本不存在返回 404；`rule_codes` 含不存在的编码返回 422
+  （`UNKNOWN_RULE_CODES`，`details.unknown_rule_codes` 列出未知编码）。
+
+```bash
+# 修改 is_vip 会影响谁？
+curl -s -X POST localhost:8000/api/rulesets/demo-promotions/impact \
+  -H 'Content-Type: application/json' \
+  -d '{"version": 1, "rule_codes": ["is_vip"]}' | python3 -m json.tool
+```
+
+响应示例：
+
+```json
+{
+  "ruleset_id": "demo-promotions",
+  "version": 1,
+  "evaluation_order": ["is_vip", "large_order", "vip_discount", "free_shipping",
+                       "coupon_save10", "coupon_save20", "manual_review"],
+  "input_rules": [
+    {"rule_code": "is_vip", "level": 0, "via": [], "conflict_group": null, "coupled": false}
+  ],
+  "direct_dependents": [
+    {"rule_code": "vip_discount", "level": 1, "via": ["is_vip"],
+     "conflict_group": "discount", "coupled": true}
+  ],
+  "transitive_dependents": [
+    {"rule_code": "manual_review", "level": 2, "via": ["vip_discount"],
+     "conflict_group": null, "coupled": false}
+  ],
+  "coupled_rules": [
+    {"rule_code": "large_order", "conflict_group": "discount",
+     "coupled_with": ["vip_discount"]}
+  ]
+}
+```
+
 ### 评估统计
 
 `GET /api/rulesets/{id}/evaluation-stats` 聚合该规则集**已持久化**的决策结果
@@ -360,5 +412,5 @@ pytest -q
 ```
 
 测试覆盖：AST 沙箱安全性、编译校验（重复编码/未知依赖/隐式引用/循环/冲突策略冲突）、
-拓扑排序、定点迭代、三种冲突策略、版本化重算、评估统计聚合（筛选/排序/零值/非法参数），
-以及完整 HTTP 接口。
+拓扑排序、定点迭代、三种冲突策略、版本化重算、评估统计聚合（筛选/排序/零值/非法参数）、
+依赖影响分析（层级/联动项/版本固定/错误码），以及完整 HTTP 接口。
